@@ -3,3 +3,5 @@
 
 # Generated matrices
 /matrices/
+
+/__pycache__/
