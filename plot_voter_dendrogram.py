@@ -1,7 +1,7 @@
 """Compute candidate coverage of a hierarchical clustering of voters.
 
 Each CSV row is treated as one voter. Clustering uses complete linkage and
-Hamming distance (the fraction of candidates on which two voters disagree).
+Hamming distance (the number of candidates on which two voters disagree).
 Coverage is reported for the final groups and for those groups plus every
 merge node above them in the tree.
 """
@@ -51,13 +51,13 @@ def compute_group_cover(
     names: list[str],
     matrix: np.ndarray,
     linkage_matrix: np.ndarray,
-    n_groups: int,
+    max_height: int,
 ) -> list[tuple[str, int, int, int, float, int, int, float]]:
-    """Count covered leaf groups and all nodes in the displayed tree.
+    """Count covered leaf groups and nodes above a join-height cutoff.
 
-    The displayed tree has ``n_groups`` leaf groups and ``n_groups - 1``
-    internal merge nodes. A node is covered when at least one voter below it
-    approves the candidate.
+    Subtrees whose integer Hamming join height is at most ``max_height`` are
+    collapsed into leaf groups. A node is covered when at least one voter
+    below it approves the candidate.
     """
     n_voters, n_candidates = matrix.shape
 
@@ -68,19 +68,23 @@ def compute_group_cover(
         left, right = int(merge[0]), int(merge[1])
         node_covered[n_voters + i] = node_covered[left] | node_covered[right]
 
-    # After the first n - p merges, these active nodes are exactly the p leaf
-    # groups shown by dendrogram(..., truncate_mode="lastp", p=p).
+    # Apply every join through the cutoff. The remaining active nodes are the
+    # leaf groups at that height, including all joins tied at the boundary.
     leaf_nodes = set(range(n_voters))
-    early_merges = n_voters - n_groups
-    for i in range(early_merges):
+    collapsed_merges = 0
+    for i, merge in enumerate(linkage_matrix):
+        if float(merge[2]) > max_height:
+            break
         left, right = map(int, linkage_matrix[i, :2])
         leaf_nodes.remove(left)
         leaf_nodes.remove(right)
         leaf_nodes.add(n_voters + i)
+        collapsed_merges += 1
 
     leaf_node_ids = sorted(leaf_nodes)
-    higher_node_ids = list(range(n_voters + early_merges, 2 * n_voters - 1))
+    higher_node_ids = list(range(n_voters + collapsed_merges, 2 * n_voters - 1))
     displayed_node_ids = leaf_node_ids + higher_node_ids
+    n_groups = len(leaf_node_ids)
     total_tree_nodes = 2 * n_groups - 1
     if len(displayed_node_ids) != total_tree_nodes:
         raise RuntimeError("Could not reconstruct the displayed dendrogram nodes")
@@ -190,13 +194,14 @@ def main() -> None:
         help="output CSV for candidate coverage of the plotted groups",
     )
     parser.add_argument(
-        "--groups",
-        "--truncate",
-        dest="groups",
+        "--max-height",
         type=int,
-        default=80,
-        metavar="GROUPS",
-        help="number of terminal groups; use 0 for individual voters (default: 80)",
+        default=4,
+        metavar="HEIGHT",
+        help=(
+            "collapse joins at or below this integer Hamming distance into "
+            "terminal groups (default: 4)"
+        ),
     )
     parser.add_argument(
         "--sort",
@@ -211,18 +216,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.groups < 0:
-        parser.error("--groups must be zero or positive")
+    if args.max_height < 0:
+        parser.error("--max-height must be a nonnegative integer")
 
     names, matrix = load_matrix(args.csv)
-    if args.groups > matrix.shape[0]:
-        parser.error("--groups cannot exceed the number of voters")
+    if args.max_height > len(names):
+        parser.error("--max-height cannot exceed the number of candidates")
     print(f"loaded {matrix.shape[0]} voters x {len(names)} candidates")
-    print("computing complete-linkage clustering with Hamming distance ...")
-    linkage_matrix = linkage(matrix, method="complete", metric="hamming")
+    print("computing complete-linkage clustering with integer Hamming distance ...")
+    # On binary vectors, city-block distance is exactly the number of entries
+    # that differ. Unlike scipy's normalized "hamming" metric, its heights are
+    # therefore integers while producing the same clustering topology.
+    linkage_matrix = linkage(matrix, method="complete", metric="cityblock")
 
-    n_groups = args.groups or matrix.shape[0]
-    cover_rows = compute_group_cover(names, matrix, linkage_matrix, n_groups)
+    cover_rows = compute_group_cover(names, matrix, linkage_matrix, args.max_height)
     cover_rows = sort_group_cover(cover_rows, args.sort, args.descending)
     print_group_cover(cover_rows)
     write_group_cover(cover_rows, args.cover_csv)
