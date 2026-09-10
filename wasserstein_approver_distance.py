@@ -17,6 +17,9 @@ from typing import TextIO
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
+
 from generic_dc_mpjr_min_gamma import hamming_distances, load_matrix
 from proportional_audit import resolve_candidate
 
@@ -167,7 +170,13 @@ def parse_args() -> argparse.Namespace:
             "the ballots of each alternative's approvers, using Hamming cost."
         )
     )
-    parser.add_argument("csv", type=Path, help="Headered binary voter-matrix CSV")
+    parser.add_argument(
+        "csv",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_CSV,
+        help=f"Headered binary voter-matrix CSV (default: {DEFAULT_CSV})",
+    )
     parser.add_argument(
         "alternatives",
         nargs="*",

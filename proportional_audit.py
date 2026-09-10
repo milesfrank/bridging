@@ -21,6 +21,9 @@ from pathlib import Path
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
+
 
 @dataclass(frozen=True)
 class AuditResult:
@@ -147,7 +150,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Audit proportionality of centers selected from a point matrix."
     )
-    parser.add_argument("csv", type=Path)
+    parser.add_argument(
+        "csv",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_CSV,
+        help=f"Point-matrix CSV to audit (default: {DEFAULT_CSV})",
+    )
     parser.add_argument(
         "--candidate", required=True,
         help="Candidate whose approvers become the chosen centers",

@@ -16,6 +16,9 @@ from pathlib import Path
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
+
 from generic_dc_mpjr_min_gamma import (
     MinimumGammaResult,
     minimum_gamma_dc_mpjr_indices,
@@ -234,7 +237,13 @@ def parse_args() -> argparse.Namespace:
             "Hamming distance."
         )
     )
-    parser.add_argument("csv", type=Path, help="Binary point-matrix CSV")
+    parser.add_argument(
+        "csv",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_CSV,
+        help=f"Binary point-matrix CSV (default: {DEFAULT_CSV})",
+    )
     parser.add_argument(
         "--candidate",
         required=True,

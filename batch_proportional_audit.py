@@ -13,6 +13,9 @@ import numpy as np
 from generic_dc_mpjr_min_gamma import minimum_gamma_dc_mpjr_indices
 from proportional_audit import audit_exact, load_csv, resolve_candidate
 
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
+
 
 OUTPUT_COLUMNS = (
     "alternative",
@@ -92,7 +95,13 @@ def parse_args() -> argparse.Namespace:
             "multiple alternatives."
         )
     )
-    parser.add_argument("csv", type=Path, help="Point-matrix CSV to audit")
+    parser.add_argument(
+        "csv",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_CSV,
+        help=f"Point-matrix CSV to audit (default: {DEFAULT_CSV})",
+    )
     parser.add_argument(
         "alternatives",
         nargs="*",

@@ -17,6 +17,9 @@ from typing import TextIO
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
+
 from generic_dc_mpjr_min_gamma import hamming_distances, load_matrix
 from proportional_audit import resolve_candidate
 
@@ -185,7 +188,13 @@ def parse_args() -> argparse.Namespace:
             "portions across levels l < k using closed Hamming balls."
         )
     )
-    parser.add_argument("voters", type=Path, help="Headered voter-matrix CSV")
+    parser.add_argument(
+        "voters",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_CSV,
+        help=f"Headered voter-matrix CSV (default: {DEFAULT_CSV})",
+    )
     parser.add_argument(
         "centers",
         type=Path,
