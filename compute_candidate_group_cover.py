@@ -1,0 +1,164 @@
+"""Compute candidate coverage of hierarchical voter groups.
+
+Kept separate from ``plot_voter_dendrogram.py`` so generating a plot does not
+also run the candidate-cover analysis.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from pathlib import Path
+
+import numpy as np
+from scipy.cluster.hierarchy import linkage
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
+DEFAULT_COVER_CSV = ROOT / "matrices" / "candidate_group_cover.csv"
+CoverRow = tuple[str, int, int, int, float, int, int, float]
+
+
+def load_matrix(path: Path) -> tuple[list[str], np.ndarray]:
+    """Load and validate a headered binary voter-by-candidate CSV."""
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        try:
+            names = next(reader)
+        except StopIteration as exc:
+            raise ValueError(f"{path} is empty") from exc
+        rows = [row for row in reader if row]
+    if not names:
+        raise ValueError(f"{path} has no candidate columns")
+    if len(rows) < 2:
+        raise ValueError("At least two voters are required for clustering")
+    if any(len(row) != len(names) for row in rows):
+        raise ValueError("Every voter row must have one value per candidate")
+    try:
+        matrix = np.asarray(rows, dtype=np.uint8)
+    except ValueError as exc:
+        raise ValueError("The matrix must contain only numeric 0/1 values") from exc
+    if not np.all((matrix == 0) | (matrix == 1)):
+        raise ValueError("The matrix must contain only 0/1 values")
+    return names, matrix
+
+
+def compute_group_cover(
+    names: list[str], matrix: np.ndarray, linkage_matrix: np.ndarray, max_height: int
+) -> list[CoverRow]:
+    """Count candidate-covered terminal groups and displayed tree nodes."""
+    n_voters, n_candidates = matrix.shape
+    node_covered = np.zeros((2 * n_voters - 1, n_candidates), dtype=bool)
+    node_covered[:n_voters] = matrix.astype(bool)
+    for i, merge in enumerate(linkage_matrix):
+        left, right = int(merge[0]), int(merge[1])
+        node_covered[n_voters + i] = node_covered[left] | node_covered[right]
+
+    leaf_nodes = set(range(n_voters))
+    collapsed_merges = 0
+    for i, merge in enumerate(linkage_matrix):
+        if float(merge[2]) > max_height:
+            break
+        left, right = int(merge[0]), int(merge[1])
+        leaf_nodes.remove(left)
+        leaf_nodes.remove(right)
+        leaf_nodes.add(n_voters + i)
+        collapsed_merges += 1
+
+    leaf_node_ids = sorted(leaf_nodes)
+    higher_node_ids = list(range(n_voters + collapsed_merges, 2 * n_voters - 1))
+    displayed_node_ids = leaf_node_ids + higher_node_ids
+    n_groups = len(leaf_node_ids)
+    total_tree_nodes = 2 * n_groups - 1
+    if len(displayed_node_ids) != total_tree_nodes:
+        raise RuntimeError("Could not reconstruct the displayed dendrogram nodes")
+
+    leaf_covered = node_covered[leaf_node_ids].sum(axis=0)
+    tree_covered = node_covered[displayed_node_ids].sum(axis=0)
+    approvers = matrix.sum(axis=0)
+    return [
+        (
+            name, int(approvers[i]), int(leaf_covered[i]), n_groups,
+            100.0 * float(leaf_covered[i]) / n_groups,
+            int(tree_covered[i]), total_tree_nodes,
+            100.0 * float(tree_covered[i]) / total_tree_nodes,
+        )
+        for i, name in enumerate(names)
+    ]
+
+
+def sort_group_cover(rows: list[CoverRow], sort_by: str, descending: bool) -> list[CoverRow]:
+    """Return coverage rows sorted by the requested field."""
+    if sort_by == "input":
+        return rows
+    field = {"candidate": 0, "approvers": 1, "leaf-cover": 4, "tree-cover": 7}[sort_by]
+    return sorted(
+        rows,
+        key=lambda row: row[field].casefold() if field == 0 else row[field],
+        reverse=descending,
+    )
+
+
+def print_group_cover(rows: list[CoverRow]) -> None:
+    """Print a compact candidate-cover table."""
+    print("candidate group cover:")
+    for candidate, approvers, leaf, leaves, leaf_pct, tree, nodes, tree_pct in rows:
+        print(
+            f"  {candidate:15s} leaves {leaf:3d}/{leaves:<3d} ({leaf_pct:6.2f}%), "
+            f"whole tree {tree:3d}/{nodes:<3d} ({tree_pct:6.2f}%), "
+            f"{approvers:4d} approvers"
+        )
+
+
+def write_group_cover(rows: list[CoverRow], out_path: Path) -> None:
+    """Write candidate group-cover counts and percentages to CSV."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "candidate", "approvers", "leaf_groups_covered", "total_leaf_groups",
+            "leaf_cover_percent", "tree_nodes_covered", "total_tree_nodes",
+            "tree_cover_percent",
+        ])
+        for candidate, approvers, leaf, leaves, leaf_pct, tree, nodes, tree_pct in rows:
+            writer.writerow([
+                candidate, approvers, leaf, leaves, f"{leaf_pct:.2f}", tree, nodes,
+                f"{tree_pct:.2f}",
+            ])
+    print(f"wrote {out_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Compute candidate coverage of complete-linkage voter groups."
+    )
+    parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
+    parser.add_argument("--cover-csv", type=Path, default=DEFAULT_COVER_CSV)
+    parser.add_argument(
+        "--max-height", type=int, default=4, metavar="HEIGHT",
+        help="collapse joins at or below this integer Hamming distance (default: 4)",
+    )
+    parser.add_argument(
+        "--sort",
+        choices=("input", "candidate", "approvers", "leaf-cover", "tree-cover"),
+        default="input",
+    )
+    parser.add_argument("--descending", action="store_true")
+    args = parser.parse_args()
+
+    if args.max_height < 0:
+        parser.error("--max-height must be a nonnegative integer")
+    names, matrix = load_matrix(args.csv)
+    if args.max_height > len(names):
+        parser.error("--max-height cannot exceed the number of candidates")
+    print(f"loaded {matrix.shape[0]} voters x {len(names)} candidates")
+    print("computing complete-linkage clustering with integer Hamming distance ...")
+    linkage_matrix = linkage(matrix, method="complete", metric="cityblock")
+    rows = compute_group_cover(names, matrix, linkage_matrix, args.max_height)
+    rows = sort_group_cover(rows, args.sort, args.descending)
+    print_group_cover(rows)
+    write_group_cover(rows, args.cover_csv)
+
+
+if __name__ == "__main__":
+    main()

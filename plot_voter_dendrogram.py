@@ -1,34 +1,42 @@
-"""Compute candidate coverage of a hierarchical clustering of voters.
+"""Plot voter clustering and report group-size metrics by cut height.
 
-Each CSV row is treated as one voter. Clustering uses complete linkage and
-Hamming distance (the number of candidates on which two voters disagree).
-Coverage is reported for the final groups and for those groups plus every
-merge node above them in the tree.
+Each CSV row is one voter. Voters are clustered with complete linkage using
+integer Hamming distance: the number of candidate approvals on which they
+disagree. Joins through ``--max-height`` are collapsed into plotted groups.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import math
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
-from scipy.cluster.hierarchy import linkage
+from scipy.cluster.hierarchy import dendrogram, linkage
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
-DEFAULT_COVER_CSV = ROOT / "matrices" / "candidate_group_cover.csv"
+DEFAULT_PLOT = ROOT / "matrices" / "voter_dendrogram.png"
+DEFAULT_METRICS_CSV = ROOT / "matrices" / "voter_group_sizes_by_height.csv"
+
+METRIC_HEADER = [
+    "height", "groups", "smallest_group", "q1_group_size",
+    "median_group_size", "mean_group_size", "q3_group_size",
+    "largest_group", "std_group_size", "coefficient_of_variation",
+    "largest_to_smallest_ratio", "largest_group_percent", "gini_coefficient",
+]
 
 
 def load_matrix(path: Path) -> tuple[list[str], np.ndarray]:
-    """Load a headered binary voter-by-candidate CSV."""
+    """Load and validate a headered binary voter-by-candidate CSV."""
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         try:
             candidate_names = next(reader)
         except StopIteration as exc:
             raise ValueError(f"{path} is empty") from exc
-
         rows = [row for row in reader if row]
 
     if not candidate_names:
@@ -37,7 +45,6 @@ def load_matrix(path: Path) -> tuple[list[str], np.ndarray]:
         raise ValueError("At least two voters are required for clustering")
     if any(len(row) != len(candidate_names) for row in rows):
         raise ValueError("Every voter row must have one value per candidate")
-
     try:
         matrix = np.asarray(rows, dtype=np.uint8)
     except ValueError as exc:
@@ -47,192 +54,183 @@ def load_matrix(path: Path) -> tuple[list[str], np.ndarray]:
     return candidate_names, matrix
 
 
-def compute_group_cover(
-    names: list[str],
-    matrix: np.ndarray,
-    linkage_matrix: np.ndarray,
-    max_height: int,
-) -> list[tuple[str, int, int, int, float, int, int, float]]:
-    """Count covered leaf groups and nodes above a join-height cutoff.
-
-    Subtrees whose integer Hamming join height is at most ``max_height`` are
-    collapsed into leaf groups. A node is covered when at least one voter
-    below it approves the candidate.
-    """
-    n_voters, n_candidates = matrix.shape
-
-    # Record candidate coverage for every original leaf and every merge node.
-    node_covered = np.zeros((2 * n_voters - 1, n_candidates), dtype=bool)
-    node_covered[:n_voters] = matrix.astype(bool)
+def groups_at_height(
+    linkage_matrix: np.ndarray, n_voters: int, height: int
+) -> tuple[list[int], np.ndarray]:
+    """Return active node IDs and descending group sizes after a height cut."""
+    active = set(range(n_voters))
     for i, merge in enumerate(linkage_matrix):
-        left, right = int(merge[0]), int(merge[1])
-        node_covered[n_voters + i] = node_covered[left] | node_covered[right]
-
-    # Apply every join through the cutoff. The remaining active nodes are the
-    # leaf groups at that height, including all joins tied at the boundary.
-    leaf_nodes = set(range(n_voters))
-    collapsed_merges = 0
-    for i, merge in enumerate(linkage_matrix):
-        if float(merge[2]) > max_height:
+        if float(merge[2]) > height:
             break
-        left, right = map(int, linkage_matrix[i, :2])
-        leaf_nodes.remove(left)
-        leaf_nodes.remove(right)
-        leaf_nodes.add(n_voters + i)
-        collapsed_merges += 1
+        left, right = int(merge[0]), int(merge[1])
+        active.remove(left)
+        active.remove(right)
+        active.add(n_voters + i)
 
-    leaf_node_ids = sorted(leaf_nodes)
-    higher_node_ids = list(range(n_voters + collapsed_merges, 2 * n_voters - 1))
-    displayed_node_ids = leaf_node_ids + higher_node_ids
-    n_groups = len(leaf_node_ids)
-    total_tree_nodes = 2 * n_groups - 1
-    if len(displayed_node_ids) != total_tree_nodes:
-        raise RuntimeError("Could not reconstruct the displayed dendrogram nodes")
+    node_ids = sorted(active)
+    sizes = np.asarray(
+        [
+            1 if node < n_voters else int(linkage_matrix[node - n_voters, 3])
+            for node in node_ids
+        ],
+        dtype=int,
+    )
+    return node_ids, np.sort(sizes)[::-1]
 
-    leaf_covered = node_covered[leaf_node_ids].sum(axis=0)
-    tree_covered = node_covered[displayed_node_ids].sum(axis=0)
 
-    approvers = matrix.sum(axis=0)
+def gini_coefficient(values: np.ndarray) -> float:
+    """Return 0 for equal-sized groups and values approaching 1 for imbalance."""
+    ordered = np.sort(values.astype(float))
+    n = len(ordered)
+    weighted_sum = np.sum(np.arange(1, n + 1) * ordered)
+    return float(2 * weighted_sum / (n * ordered.sum()) - (n + 1) / n)
+
+
+def group_size_metrics(height: int, sizes: np.ndarray) -> tuple[float, ...]:
+    """Summarize the relative sizes of all groups at one cut height."""
+    q1, median, q3 = np.percentile(sizes, [25, 50, 75])
+    mean = float(np.mean(sizes))
+    std = float(np.std(sizes))
+    smallest = int(np.min(sizes))
+    largest = int(np.max(sizes))
+    return (
+        height, len(sizes), smallest, float(q1), float(median), mean,
+        float(q3), largest, std, std / mean if mean else 0.0,
+        largest / smallest, 100.0 * largest / int(np.sum(sizes)),
+        gini_coefficient(sizes),
+    )
+
+
+def metrics_by_height(
+    linkage_matrix: np.ndarray, n_voters: int, through_height: int = 0
+) -> list[tuple[float, ...]]:
+    """Calculate metrics at every attainable integer distance level."""
+    maximum = max(through_height, int(math.ceil(float(linkage_matrix[-1, 2]))))
     return [
-        (
-            name,
-            int(approvers[i]),
-            int(leaf_covered[i]),
-            n_groups,
-            100.0 * float(leaf_covered[i]) / n_groups,
-            int(tree_covered[i]),
-            total_tree_nodes,
-            100.0 * float(tree_covered[i]) / total_tree_nodes,
-        )
-        for i, name in enumerate(names)
+        group_size_metrics(h, groups_at_height(linkage_matrix, n_voters, h)[1])
+        for h in range(maximum + 1)
     ]
 
 
-def write_group_cover(
-    rows: list[tuple[str, int, int, int, float, int, int, float]], out_path: Path
-) -> None:
-    """Write candidate group-cover counts and percentages to CSV."""
+def print_metrics(rows: list[tuple[float, ...]], selected_height: int) -> None:
+    """Print a compact comparison of group sizes across heights."""
+    print("\ngroup sizes by cut height:")
+    print("height  groups     min      q1  median    mean      q3     max  max/min  largest%    CV   Gini")
+    for row in rows:
+        height, groups, minimum, q1, median, mean, q3, maximum, _, cv, ratio, share, gini = row
+        marker = "*" if height == selected_height else " "
+        print(
+            f"{marker}{int(height):5d} {int(groups):7d} {int(minimum):7d} "
+            f"{q1:7.1f} {median:7.1f} {mean:7.1f} {q3:7.1f} "
+            f"{int(maximum):7d} {ratio:8.1f} {share:8.2f}% {cv:5.2f} {gini:6.3f}"
+        )
+    print("* selected plotting height; CV and Gini are 0 when groups are equal-sized")
+
+
+def write_metrics(rows: list[tuple[float, ...]], out_path: Path) -> None:
+    """Write the height-level group-size comparison to CSV."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            [
-                "candidate",
-                "approvers",
-                "leaf_groups_covered",
-                "total_leaf_groups",
-                "leaf_cover_percent",
-                "tree_nodes_covered",
-                "total_tree_nodes",
-                "tree_cover_percent",
-            ]
-        )
+        writer.writerow(METRIC_HEADER)
         for row in rows:
-            candidate, approvers, leaf, leaves, leaf_pct, tree, nodes, tree_pct = row
             writer.writerow(
-                [
-                    candidate,
-                    approvers,
-                    leaf,
-                    leaves,
-                    f"{leaf_pct:.2f}",
-                    tree,
-                    nodes,
-                    f"{tree_pct:.2f}",
-                ]
+                [int(row[0]), int(row[1]), int(row[2])]
+                + [f"{value:.4f}" for value in row[3:7]]
+                + [int(row[7])]
+                + [f"{value:.4f}" for value in row[8:]]
             )
     print(f"wrote {out_path}")
 
 
-def print_group_cover(
-    rows: list[tuple[str, int, int, int, float, int, int, float]],
+def plot_dendrogram(
+    linkage_matrix: np.ndarray,
+    n_voters: int,
+    max_height: int,
+    out_path: Path,
+    show: bool,
 ) -> None:
-    """Print a compact candidate cover table."""
-    print("candidate group cover:")
-    for row in rows:
-        candidate, approvers, leaf, leaves, leaf_pct, tree, nodes, tree_pct = row
-        print(
-            f"  {candidate:15s} leaves {leaf:3d}/{leaves:<3d} ({leaf_pct:6.2f}%), "
-            f"whole tree {tree:3d}/{nodes:<3d} ({tree_pct:6.2f}%), "
-            f"{approvers:4d} approvers"
+    """Plot the hierarchy with groups through max_height collapsed to leaves."""
+    _, sizes = groups_at_height(linkage_matrix, n_voters, max_height)
+    n_groups = len(sizes)
+    width = min(24.0, max(12.0, 0.12 * n_groups))
+    fig, ax = plt.subplots(figsize=(width, 7.5))
+
+    def group_label(node_id: int) -> str:
+        size = (
+            1
+            if node_id < n_voters
+            else int(linkage_matrix[node_id - n_voters, 3])
         )
+        return f"n={size}"
 
-
-def sort_group_cover(
-    rows: list[tuple[str, int, int, int, float, int, int, float]],
-    sort_by: str,
-    descending: bool,
-) -> list[tuple[str, int, int, int, float, int, int, float]]:
-    """Return coverage rows sorted by the requested field."""
-    if sort_by == "input":
-        return rows
-    field = {
-        "candidate": 0,
-        "approvers": 1,
-        "leaf-cover": 4,
-        "tree-cover": 7,
-    }[sort_by]
-    return sorted(
-        rows,
-        key=lambda row: row[field].casefold() if field == 0 else row[field],
-        reverse=descending,
+    dendrogram(
+        linkage_matrix,
+        truncate_mode="lastp",
+        p=n_groups,
+        show_leaf_counts=True,
+        show_contracted=True,
+        leaf_label_func=group_label,
+        leaf_rotation=90,
+        leaf_font_size=max(4, min(8, 700 / n_groups)),
+        color_threshold=max_height,
+        above_threshold_color="#4c4c4c",
+        ax=ax,
     )
+    ax.axhline(
+        max_height, color="#b22222", linewidth=1.2, linestyle="--",
+        label=f"cut height = {max_height}",
+    )
+    ax.set_title(
+        f"Complete-linkage voter dendrogram: {n_groups} groups at height {max_height}"
+    )
+    ax.set_xlabel("Terminal group size (number of voters)")
+    ax.set_ylabel("Number of candidate approvals that differ")
+    ax.legend(loc="upper left")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=180)
+    print(f"wrote {out_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Compute candidate coverage of complete-linkage voter groups "
-            "using Hamming distance."
-        )
+        description="Plot complete-linkage voter groups and report their sizes."
     )
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
+    parser.add_argument("--out", type=Path, default=DEFAULT_PLOT)
     parser.add_argument(
-        "--cover-csv",
-        type=Path,
-        default=DEFAULT_COVER_CSV,
-        help="output CSV for candidate coverage of the plotted groups",
+        "--metrics-csv", type=Path, default=DEFAULT_METRICS_CSV,
+        help="output CSV containing group-size metrics at every height",
     )
     parser.add_argument(
-        "--max-height",
-        type=int,
-        default=4,
-        metavar="HEIGHT",
-        help=(
-            "collapse joins at or below this integer Hamming distance into "
-            "terminal groups (default: 4)"
-        ),
+        "--max-height", type=int, default=4, metavar="HEIGHT",
+        help="collapse joins at or below this integer Hamming distance (default: 4)",
     )
-    parser.add_argument(
-        "--sort",
-        choices=("input", "candidate", "approvers", "leaf-cover", "tree-cover"),
-        default="input",
-        help="field used to sort terminal and CSV output (default: input order)",
-    )
-    parser.add_argument(
-        "--descending",
-        action="store_true",
-        help="sort the selected field from greatest to least",
-    )
+    parser.add_argument("--show", action="store_true")
     args = parser.parse_args()
 
     if args.max_height < 0:
         parser.error("--max-height must be a nonnegative integer")
-
     names, matrix = load_matrix(args.csv)
     if args.max_height > len(names):
         parser.error("--max-height cannot exceed the number of candidates")
     print(f"loaded {matrix.shape[0]} voters x {len(names)} candidates")
     print("computing complete-linkage clustering with integer Hamming distance ...")
-    # On binary vectors, city-block distance is exactly the number of entries
-    # that differ. Unlike scipy's normalized "hamming" metric, its heights are
-    # therefore integers while producing the same clustering topology.
     linkage_matrix = linkage(matrix, method="complete", metric="cityblock")
 
-    cover_rows = compute_group_cover(names, matrix, linkage_matrix, args.max_height)
-    cover_rows = sort_group_cover(cover_rows, args.sort, args.descending)
-    print_group_cover(cover_rows)
-    write_group_cover(cover_rows, args.cover_csv)
+    rows = metrics_by_height(linkage_matrix, matrix.shape[0], args.max_height)
+    print_metrics(rows, args.max_height)
+    _, selected_sizes = groups_at_height(linkage_matrix, matrix.shape[0], args.max_height)
+    print(f"\nselected group sizes, largest to smallest:\n  {selected_sizes.tolist()}")
+    write_metrics(rows, args.metrics_csv)
+    plot_dendrogram(linkage_matrix, matrix.shape[0], args.max_height, args.out, args.show)
 
 
 if __name__ == "__main__":
