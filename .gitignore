@@ -1,7 +1,14 @@
 # Downloaded PrefLib dataset
 /00026_frenchapproval/
+/00073_frenchapproval/
 
 # Generated matrices
 /matrices/
 
-/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Generated ordinal samples, coordinates, and preference-map images
+/preference_map_outputs/
