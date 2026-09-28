@@ -117,3 +117,35 @@ Outputs are:
 The bundled binary is a CPython 3.10 Windows extension. Exact distances are
 cached, so rerunning with the same seed and landmarks is fast.
 
+## Approval-ballot maps with Jaccard MDS
+
+To map the approval ballots directly, without generating ordinal completions:
+
+```powershell
+python plot_french_jaccard_mds.py
+```
+
+Each point is a sampled voter. For approval sets `A` and `B`, MDS receives the
+Jaccard dissimilarity
+
+```text
+1 - |A intersection B| / |A union B|.
+```
+
+This is `1 - Jaccard similarity`, because MDS requires a dissimilarity matrix.
+Two empty ballots are assigned distance zero. Sampling is without replacement
+and respects the original PrefLib ballot multiplicities.
+
+The six elections in `00026` share a single MDS embedding and are colored by
+district. Dataset `00073` is embedded separately because its candidates form a
+different set. Metric SMACOF MDS is initialized from a classical MDS solution,
+and normalized stress is printed on each plot.
+
+The defaults use at most 250 voters from each election. Change that with:
+
+```powershell
+python plot_french_jaccard_mds.py --max-voters-per-election 500
+```
+
+Images and coordinates are written to `preference_map_outputs/jaccard_mds/`.
+
