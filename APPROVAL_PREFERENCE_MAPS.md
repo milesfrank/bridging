@@ -149,3 +149,49 @@ python plot_french_jaccard_mds.py --max-voters-per-election 500
 
 Images and coordinates are written to `preference_map_outputs/jaccard_mds/`.
 
+## Approval diversity, agreement, and polarization
+
+[`approval_dap_candidate_effects.py`](approval_dap_candidate_effects.py) adapts
+Definitions 2--4 and the agreement/1-Kemeny relation from the IJCAI23 paper to
+approval ballots. Run:
+
+```powershell
+python approval_dap_candidate_effects.py
+```
+
+For a ballot metric `d`, let `kappa_k` be the total distance from all voters to
+their closest one of `k` representative ballots. The reported indices are:
+
+```text
+agreement    = 1 - 2*kappa_1 / (n*diameter)
+diversity    = sum_k (kappa_k/k) / (n*diameter)
+polarization = 2*(kappa_1-kappa_2) / (n*diameter)
+```
+
+Raw Hamming distance has `diameter = number of candidates`; Jaccard distance
+has `diameter = 1`. As in the scalable algorithm shipped with the paper,
+representatives are selected greedily from observed ballot types. Ballot types
+remain multiplicity-weighted, so this uses the complete electorate rather than
+a voter sample.
+
+The default analyzes the pooled six-district `00026` profile and the `00073`
+profile. For every candidate and both metrics, it removes that candidate from
+all ballots, merges newly identical ballot types, recalculates all three
+indices, and reports:
+
+```text
+delta = score after removal - original score.
+```
+
+Results are written to
+`preference_map_outputs/approval_dap_candidate_effects.csv`. Baseline rows have
+an empty `removed_candidate` field. To additionally analyze each `00026`
+district separately, use `--include-individual-00026`.
+
+The factor `2` in the paper's agreement normalization is tailored to swap
+distance. With Jaccard distance, a 1-median cost can exceed half of
+`n*diameter`, so a direct substitution can produce negative agreement values.
+The script deliberately reports these values without clipping or silently
+changing the paper's formula; the CSV includes a normalization note on every
+row.
+

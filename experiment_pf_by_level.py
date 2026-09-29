@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+from ballot_distances import row_distances
 
 from nested_greedy_capture import DEFAULT_CSV, DEFAULT_OUTPUT, load_matrix
 
@@ -77,6 +78,8 @@ def distances_to_unique_locations(
     voters: np.ndarray, unique_locations: np.ndarray, metric: str
 ) -> np.ndarray:
     """Return voter-to-candidate distances, preserving compact integer Hamming data."""
+    if metric == "jaccard":
+        return row_distances(voters, unique_locations, metric)
     if metric == "hamming":
         return np.count_nonzero(
             voters[:, None, :] != unique_locations[None, :, :], axis=2
@@ -93,12 +96,14 @@ def exact_pf_rho(
     distance_to_selected: np.ndarray,
     distance_to_candidates: np.ndarray,
     quota: int,
+    voter_counts: np.ndarray | None = None,
 ) -> float:
     """Return exact rho-PF using an explicit blocking-coalition quota."""
     n = len(distance_to_selected)
     if distance_to_candidates.shape[0] != n:
         raise ValueError("candidate distances have the wrong population size")
-    if not 1 <= quota <= n:
+    population = n if voter_counts is None else int(np.sum(voter_counts))
+    if not 1 <= quota <= population:
         raise ValueError("quota must be between 1 and the population size")
 
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -111,7 +116,14 @@ def exact_pf_rho(
     ratios[
         (distance_to_candidates == 0) & (distance_to_selected[:, None] > 0)
     ] = np.inf
-    quota_ratios = np.partition(ratios, n - quota, axis=0)[n - quota]
+    if voter_counts is None:
+        quota_ratios = np.partition(ratios, n - quota, axis=0)[n - quota]
+    else:
+        order = np.argsort(-ratios, axis=0)
+        cumulative = np.cumsum(voter_counts[order], axis=0)
+        ranks = np.argmax(cumulative >= quota, axis=0)
+        columns = np.arange(ratios.shape[1])
+        quota_ratios = ratios[order[ranks, columns], columns]
     return max(1.0, float(np.max(quota_ratios)))
 
 
@@ -122,6 +134,7 @@ def run_trials(
     distance_to_candidates: np.ndarray,
     trials: int,
     rng: np.random.Generator,
+    voter_counts: np.ndarray | None = None,
 ) -> TrialSummary:
     """Sample representatives and exactly audit each resulting location set."""
     rhos = np.empty(trials, dtype=float)
@@ -135,7 +148,7 @@ def run_trials(
         distinct[trial] = len(selected_types)
         distance_to_selected = distance_to_candidates[:, selected_types].min(axis=1)
         rhos[trial] = exact_pf_rho(
-            distance_to_selected, distance_to_candidates, quota
+            distance_to_selected, distance_to_candidates, quota, voter_counts
         )
     return TrialSummary(rhos, distinct)
 
@@ -180,16 +193,22 @@ def experiment(
     output: Path,
     trials: int,
     seed: int,
+    metric: str | None = None,
 ) -> list[dict[str, str | int]]:
     """Run the experiment and write one summary row for every k."""
     document, levels = load_group_levels(group_json)
     _, voters = load_matrix(voter_csv)
     if int(document.get("population_size", -1)) != len(voters):
         raise ValueError("group JSON and voter CSV have different population sizes")
-    metric = str(document.get("metric", "hamming"))
+    group_metric = str(document.get("metric", "hamming"))
+    if metric is not None and metric != group_metric:
+        raise ValueError("--metric must match the group JSON; regenerate groups with that metric first")
+    metric = group_metric
 
-    unique_locations, voter_type = np.unique(voters, axis=0, return_inverse=True)
-    candidate_distances = distances_to_unique_locations(voters, unique_locations, metric)
+    unique_locations, voter_type, counts = np.unique(
+        voters, axis=0, return_inverse=True, return_counts=True
+    )
+    candidate_distances = distances_to_unique_locations(unique_locations, unique_locations, metric)
     rng = np.random.default_rng(seed)
 
     rows: list[dict[str, str | int]] = []
@@ -203,6 +222,7 @@ def experiment(
                 candidate_distances,
                 trials,
                 rng,
+                counts,
             )
         if cached_summary is None:
             raise ValueError("first level cannot copy another level")
@@ -225,6 +245,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=DEFAULT_RESULTS)
     parser.add_argument("--trials", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--metric", choices=("hamming", "jaccard", "euclidean"),
+                        help="Defaults to group JSON metric; if specified, must match it")
     args = parser.parse_args()
     if args.trials < 1:
         parser.error("--trials must be positive")
@@ -233,7 +255,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    rows = experiment(args.groups, args.voters, args.output, args.trials, args.seed)
+    rows = experiment(args.groups, args.voters, args.output, args.trials, args.seed, args.metric)
     finite_maxima = [
         float(row["rho_max"])
         for row in rows

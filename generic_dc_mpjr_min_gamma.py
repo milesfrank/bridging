@@ -1,4 +1,4 @@
-"""Find the minimum gamma satisfying DC-mPJR+ under Hamming distance.
+"""Find the minimum gamma satisfying DC-mPJR+ under Hamming or Jaccard distance.
 
 This is a domain-neutral implementation for generic centroid-clustering
 instances. It reads separate matrices for the agents N, candidate centers M,
@@ -15,6 +15,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
+from ballot_distances import row_distances
 
 
 @dataclass(frozen=True)
@@ -24,10 +25,10 @@ class MinimumGammaResult:
     candidate_center_count: int
     selected_center_count: int
     witness_center: int | None = None
-    witness_radius: int | None = None
+    witness_radius: float | None = None
     witness_coalition_size: int | None = None
     witness_deserved_centers: int | None = None
-    witness_required_distance: int | None = None
+    witness_required_distance: float | None = None
 
     @property
     def finite(self) -> bool:
@@ -126,8 +127,9 @@ def minimum_gamma_dc_mpjr(
     agents: np.ndarray,
     candidate_centers: np.ndarray,
     selected_centers: np.ndarray,
+    metric: str = "hamming",
 ) -> MinimumGammaResult:
-    """Return the exact minimum gamma for DC-mPJR+ with Hamming distance.
+    """Return the exact minimum gamma for DC-mPJR+ with the chosen metric.
 
     The result's witness is the default-coalition prefix imposing the largest
     lower bound on gamma. ``gamma=None`` means that no finite gamma suffices,
@@ -146,6 +148,7 @@ def minimum_gamma_dc_mpjr(
         agents,
         candidate_centers,
         selected_indices,
+        metric=metric,
     )
 
 
@@ -153,6 +156,7 @@ def minimum_gamma_dc_mpjr_indices(
     agents: np.ndarray,
     candidate_centers: np.ndarray,
     selected_indices: np.ndarray | list[int],
+    metric: str = "hamming",
 ) -> MinimumGammaResult:
     """Return the exact minimum gamma when X is identified by rows of M.
 
@@ -179,22 +183,26 @@ def minimum_gamma_dc_mpjr_indices(
     selected_centers = candidate_centers[selected_indices]
     selected_mask = np.zeros(m, dtype=bool)
     selected_mask[selected_indices] = True
-    agent_to_selected = hamming_distances(agents, selected_centers)
+    agents, agent_counts = np.unique(agents, axis=0, return_counts=True)
+    selected_types, selected_counts = np.unique(selected_centers, axis=0, return_counts=True)
+    agent_to_selected = row_distances(agents, selected_types, metric)
+    unselected = np.flatnonzero(~selected_mask)
+    _, first = np.unique(candidate_centers[unselected], axis=0, return_index=True)
+    unselected = unselected[np.sort(first)]
 
     minimum_gamma = Fraction(1, 1)
-    witness: tuple[int, int, int, int, int] | None = None
+    witness: tuple[int, float, int, int, float] | None = None
 
-    for center_index in np.flatnonzero(~selected_mask):
-        distances_to_center = np.count_nonzero(
-            agents != candidate_centers[center_index], axis=1
-        )
+    for center_index in unselected:
+        distances_to_center = row_distances(agents, candidate_centers[center_index:center_index + 1], metric)[:, 0]
         order = np.argsort(distances_to_center, kind="stable")
         ordered_distances = distances_to_center[order]
-        delta = np.full(k, np.inf)
+        delta = np.full(len(selected_types), np.inf)
+        cumulative_counts = np.cumsum(agent_counts[order])
 
         batch_start = 0
-        while batch_start < n:
-            radius = int(ordered_distances[batch_start])
+        while batch_start < len(agents):
+            radius = float(ordered_distances[batch_start])
             batch_end = int(
                 np.searchsorted(ordered_distances, radius, side="right")
             )
@@ -204,17 +212,14 @@ def minimum_gamma_dc_mpjr_indices(
                 agent_to_selected[new_agents].min(axis=0),
             )
 
-            coalition_size = batch_end
+            coalition_size = int(cumulative_counts[batch_end - 1])
             deserved_centers = coalition_size * k // n
             if deserved_centers > 0:
                 # Coverage reaches t exactly when gamma * radius reaches the
-                # t-th-smallest delta(x). Hamming distances make this an exact
-                # rational threshold with denominator equal to the radius.
-                required_distance = int(
-                    np.partition(delta, deserved_centers - 1)[
-                        deserved_centers - 1
-                    ]
-                )
+                # t-th-smallest delta(x), counting repeated selected centers.
+                delta_order = np.argsort(delta, kind="stable")
+                rank = np.searchsorted(np.cumsum(selected_counts[delta_order]), deserved_centers)
+                required_distance = float(delta[delta_order[rank]])
                 current_witness = (
                     int(center_index),
                     radius,
@@ -237,7 +242,12 @@ def minimum_gamma_dc_mpjr_indices(
                     )
 
                 if radius > 0:
-                    required_gamma = Fraction(required_distance, radius)
+                    # Jaccard denominators are union sizes, bounded by width.
+                    denominator_bound = max(1, agents.shape[1])
+                    required_gamma = (
+                        Fraction(required_distance).limit_denominator(denominator_bound)
+                        / Fraction(radius).limit_denominator(denominator_bound)
+                    )
                     if required_gamma > minimum_gamma:
                         minimum_gamma = required_gamma
                         witness = current_witness
@@ -261,12 +271,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Find the exact minimum gamma satisfying DC-mPJR+ under "
-            "Hamming distance."
+            "Hamming or Jaccard distance."
         )
     )
     parser.add_argument("agents", type=Path, help="Headered CSV for N")
     parser.add_argument("candidate_centers", type=Path, help="Headered CSV for M")
     parser.add_argument("selected_centers", type=Path, help="Headered CSV for X")
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default="hamming")
     return parser.parse_args()
 
 
@@ -282,11 +293,12 @@ def main() -> None:
             agents,
             candidate_centers,
             selected_centers,
+            metric=args.metric,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
-    print("distance: Hamming")
+    print(f"distance: {args.metric}")
     print(f"population size |N|: {result.population_size}")
     print(f"candidate centers |M|: {result.candidate_center_count}")
     print(f"selected centers |X|: {result.selected_center_count}")

@@ -48,7 +48,7 @@ def output_sort_key(
 
 
 def audit_alternative(
-    names: list[str], points: np.ndarray, alternative: str
+    names: list[str], points: np.ndarray, alternative: str, metric: str | None = None
 ) -> dict[str, str | int | float]:
     """Audit one alternative and return a row suitable for CSV output."""
     column = resolve_candidate(names, alternative)
@@ -66,11 +66,13 @@ def audit_alternative(
         points[approving],
         candidate_centers=potential_approvers,
         k=approver_count,
+        metric=metric or "euclidean",
     )
     minimum_gamma = minimum_gamma_dc_mpjr_indices(
         agents=points,
         candidate_centers=potential_approvers,
         selected_indices=np.flatnonzero(approving),
+        metric=metric or "hamming",
     )
     return {
         "alternative": names[column],
@@ -130,6 +132,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Reverse the --sort-by order",
     )
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default=None,
+                        help="Use one metric for both audits; default preserves Euclidean PF and Hamming gamma")
     args = parser.parse_args()
     if args.descending and args.sort_by is None:
         parser.error("--descending requires --sort-by")
@@ -150,7 +154,7 @@ def main() -> int:
     failed = False
     for alternative in alternatives:
         try:
-            rows.append(audit_alternative(names, points, alternative))
+            rows.append(audit_alternative(names, points, alternative, args.metric))
         except (SystemExit, ValueError) as error:
             print(f"{alternative}: {error}", file=sys.stderr)
             failed = True

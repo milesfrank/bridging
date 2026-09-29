@@ -1,4 +1,4 @@
-"""Find every clear voter community under Hamming distance.
+"""Find every clear voter community under Hamming or Jaccard distance.
 
 A proper subset S of the voters is clear when its smallest distance to a voter
 outside S is strictly greater than its diameter.  Identical CSV rows still
@@ -19,8 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from ballot_distances import row_distances
 
-from generic_dc_mpjr_min_gamma import hamming_distances, load_matrix
+from generic_dc_mpjr_min_gamma import load_matrix
 
 
 ROOT = Path(__file__).resolve().parent
@@ -35,8 +36,8 @@ class ClearCommunity:
 
     voter_rows: tuple[int, ...]
     distinct_ballot_types: int
-    diameter: int
-    min_external_distance: int
+    diameter: float
+    min_external_distance: float
 
     @property
     def size(self) -> int:
@@ -74,7 +75,7 @@ class _DisjointSet:
         return [np.asarray(group, dtype=np.int64) for group in groups.values()]
 
 
-def find_clear_communities(voters: np.ndarray) -> list[ClearCommunity]:
+def find_clear_communities(voters: np.ndarray, metric: str = "hamming") -> list[ClearCommunity]:
     """Return all proper clear communities of at least two voters.
 
     The search is exhaustive: at radius r, a clear set of diameter r must be a
@@ -96,17 +97,15 @@ def find_clear_communities(voters: np.ndarray) -> list[ClearCommunity]:
         tuple(int(row) + 1 for row in np.flatnonzero(inverse == type_index))
         for type_index in range(type_count)
     ]
-    distances = hamming_distances(ballot_types, ballot_types).astype(
-        np.int32, copy=False
-    )
+    distances = row_distances(ballot_types, ballot_types, metric)
     upper_left, upper_right = np.triu_indices(type_count, k=1)
     upper_distances = distances[upper_left, upper_right]
     disjoint_set = _DisjointSet(type_count)
     communities: list[ClearCommunity] = []
 
     # Radius zero handles communities consisting of multiple identical voters.
-    # Subsequent radii add all edges at that exact integer Hamming distance.
-    for radius in range(int(upper_distances.max()) + 1):
+    # Subsequent radii add all edges at each distinct distance.
+    for radius in np.unique(np.append(upper_distances, 0)):
         if radius > 0:
             for edge in np.flatnonzero(upper_distances == radius):
                 disjoint_set.union(
@@ -120,13 +119,13 @@ def find_clear_communities(voters: np.ndarray) -> list[ClearCommunity]:
             if population_size < 2:
                 continue
 
-            diameter = int(distances[np.ix_(component, component)].max())
+            diameter = float(distances[np.ix_(component, component)].max())
             if diameter != radius:
                 continue
 
             outside_mask = np.ones(type_count, dtype=bool)
             outside_mask[component] = False
-            min_external = int(
+            min_external = float(
                 distances[np.ix_(component, np.flatnonzero(outside_mask))].min()
             )
             # Components guarantee this, but retaining the explicit check makes
@@ -270,6 +269,7 @@ def parse_args() -> argparse.Namespace:
         "--expand-q", action="store_true",
         help="write one row per qualifying q instead of the compact range 2..size",
     )
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default="hamming")
     return parser.parse_args()
 
 
@@ -277,7 +277,7 @@ def main() -> int:
     args = parse_args()
     try:
         _, voters = load_matrix(args.csv)
-        communities = find_clear_communities(voters)
+        communities = find_clear_communities(voters, args.metric)
         partition = find_partition(communities, len(voters))
         write_communities(communities, args.output, args.expand_q)
         write_partition(partition, args.partition_output)

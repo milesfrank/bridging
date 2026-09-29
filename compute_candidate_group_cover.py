@@ -44,7 +44,7 @@ def load_matrix(path: Path) -> tuple[list[str], np.ndarray]:
 
 
 def compute_group_cover(
-    names: list[str], matrix: np.ndarray, linkage_matrix: np.ndarray, max_height: int
+    names: list[str], matrix: np.ndarray, linkage_matrix: np.ndarray, max_height: float
 ) -> list[CoverRow]:
     """Count candidate-covered terminal groups and displayed tree nodes."""
     n_voters, n_candidates = matrix.shape
@@ -135,8 +135,8 @@ def main() -> None:
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     parser.add_argument("--cover-csv", type=Path, default=DEFAULT_COVER_CSV)
     parser.add_argument(
-        "--max-height", type=int, default=4, metavar="HEIGHT",
-        help="collapse joins at or below this integer Hamming distance (default: 4)",
+        "--max-height", type=float, default=None, metavar="HEIGHT",
+        help="collapse joins through this distance (default: Hamming 4, Jaccard 0.5)",
     )
     parser.add_argument(
         "--sort",
@@ -144,16 +144,19 @@ def main() -> None:
         default="input",
     )
     parser.add_argument("--descending", action="store_true")
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default="hamming")
     args = parser.parse_args()
+    if args.max_height is None:
+        args.max_height = 0.5 if args.metric == "jaccard" else 4
 
     if args.max_height < 0:
-        parser.error("--max-height must be a nonnegative integer")
+        parser.error("--max-height must be nonnegative")
     names, matrix = load_matrix(args.csv)
-    if args.max_height > len(names):
-        parser.error("--max-height cannot exceed the number of candidates")
+    if args.max_height > (1 if args.metric == "jaccard" else len(names)):
+        parser.error("--max-height exceeds the metric diameter")
     print(f"loaded {matrix.shape[0]} voters x {len(names)} candidates")
-    print("computing complete-linkage clustering with integer Hamming distance ...")
-    linkage_matrix = linkage(matrix, method="complete", metric="cityblock")
+    print(f"computing complete-linkage clustering with {args.metric} distance ...")
+    linkage_matrix = linkage(matrix, method="complete", metric="jaccard" if args.metric == "jaccard" else "cityblock")
     rows = compute_group_cover(names, matrix, linkage_matrix, args.max_height)
     rows = sort_group_cover(rows, args.sort, args.descending)
     print_group_cover(rows)

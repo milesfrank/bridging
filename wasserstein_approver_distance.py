@@ -1,7 +1,7 @@
 """Compare all voters with an alternative's approvers using Wasserstein-1.
 
-Each row is an empirical ballot in approval space.  Transport cost is Hamming
-distance, so a distance of one means changing one approval coordinate.  The
+Each row is an empirical ballot in approval space. Transport cost defaults to
+raw Hamming distance; Jaccard distance is also supported. The
 calculation is exact up to the numerical tolerance of SciPy's HiGHS linear
 programming solver.
 """
@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import TextIO
 
 import numpy as np
+from ballot_distances import row_distances
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
 
-from generic_dc_mpjr_min_gamma import hamming_distances, load_matrix
+from generic_dc_mpjr_min_gamma import load_matrix
 from proportional_audit import resolve_candidate
 
 
@@ -45,6 +46,7 @@ def _optimal_transport_cost(
     source_counts: np.ndarray,
     target: np.ndarray,
     target_counts: np.ndarray,
+    metric: str = "hamming",
 ) -> float:
     """Return Wasserstein-1 between two weighted empirical distributions."""
     try:
@@ -83,7 +85,7 @@ def _optimal_transport_cost(
     ).tocsr()
 
     solution = linprog(
-        hamming_distances(source, target).astype(float).ravel(),
+        row_distances(source, target, metric).astype(float).ravel(),
         A_eq=constraints,
         b_eq=np.concatenate((source_mass, target_mass)),
         bounds=(0, None),
@@ -98,10 +100,11 @@ def wasserstein_to_approvers(
     voters: np.ndarray,
     candidate_column: int,
     alternative: str = "candidate",
+    metric: str = "hamming",
 ) -> WassersteinResult:
     """Return W1(full electorate, electorate conditional on approval).
 
-    Ballot rows must be binary.  Hamming distance is used as the ground cost.
+    Ballot rows must be binary. The chosen metric is used as the ground cost.
     """
     voters = np.asarray(voters)
     if voters.ndim != 2 or voters.shape[0] == 0 or voters.shape[1] == 0:
@@ -130,6 +133,7 @@ def wasserstein_to_approvers(
             nonapprover_counts,
             approver_types,
             approver_counts,
+            metric=metric,
         )
 
         # P_all = a P_approvers + (1-a) P_nonapprovers.  By homogeneity of
@@ -167,7 +171,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Calculate Wasserstein-1 distance between all voter ballots and "
-            "the ballots of each alternative's approvers, using Hamming cost."
+            "the ballots of each alternative's approvers, using Hamming or Jaccard cost."
         )
     )
     parser.add_argument(
@@ -192,6 +196,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Sort from smallest to largest Wasserstein distance",
     )
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default="hamming")
     return parser.parse_args()
 
 
@@ -210,7 +215,7 @@ def main() -> int:
         try:
             column = resolve_candidate(names, query)
             results.append(
-                wasserstein_to_approvers(voters, column, names[column])
+                wasserstein_to_approvers(voters, column, names[column], metric=args.metric)
             )
         except (SystemExit, ValueError) as error:
             print(f"{query}: {error}", file=sys.stderr)

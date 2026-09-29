@@ -1,8 +1,8 @@
 """Plot voter clustering and report group-size metrics by cut height.
 
 Each CSV row is one voter. Voters are clustered with complete linkage using
-integer Hamming distance: the number of candidate approvals on which they
-disagree. Joins through ``--max-height`` are collapsed into plotted groups.
+raw Hamming or Jaccard distance. Joins through ``--max-height`` are collapsed
+into plotted groups.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def load_matrix(path: Path) -> tuple[list[str], np.ndarray]:
 
 
 def groups_at_height(
-    linkage_matrix: np.ndarray, n_voters: int, height: int
+    linkage_matrix: np.ndarray, n_voters: int, height: float
 ) -> tuple[list[int], np.ndarray]:
     """Return active node IDs and descending group sizes after a height cut."""
     active = set(range(n_voters))
@@ -86,7 +86,7 @@ def gini_coefficient(values: np.ndarray) -> float:
     return float(2 * weighted_sum / (n * ordered.sum()) - (n + 1) / n)
 
 
-def group_size_metrics(height: int, sizes: np.ndarray) -> tuple[float, ...]:
+def group_size_metrics(height: float, sizes: np.ndarray) -> tuple[float, ...]:
     """Summarize the relative sizes of all groups at one cut height."""
     q1, median, q3 = np.percentile(sizes, [25, 50, 75])
     mean = float(np.mean(sizes))
@@ -102,17 +102,20 @@ def group_size_metrics(height: int, sizes: np.ndarray) -> tuple[float, ...]:
 
 
 def metrics_by_height(
-    linkage_matrix: np.ndarray, n_voters: int, through_height: int = 0
+    linkage_matrix: np.ndarray, n_voters: int, through_height: float = 0, metric: str = "hamming"
 ) -> list[tuple[float, ...]]:
-    """Calculate metrics at every attainable integer distance level."""
+    """Report integer Hamming levels or distinct Jaccard merge heights."""
+    if metric == "jaccard":
+        heights = np.unique(np.append(linkage_matrix[:, 2], [0, through_height]))
+        return [group_size_metrics(h, groups_at_height(linkage_matrix, n_voters, h)[1]) for h in heights]
     maximum = max(through_height, int(math.ceil(float(linkage_matrix[-1, 2]))))
     return [
         group_size_metrics(h, groups_at_height(linkage_matrix, n_voters, h)[1])
-        for h in range(maximum + 1)
+        for h in range(int(maximum) + 1)
     ]
 
 
-def print_metrics(rows: list[tuple[float, ...]], selected_height: int) -> None:
+def print_metrics(rows: list[tuple[float, ...]], selected_height: float) -> None:
     """Print a compact comparison of group sizes across heights."""
     print("\ngroup sizes by cut height:")
     print("height  groups     min      q1  median    mean      q3     max  max/min  largest%    CV   Gini")
@@ -120,7 +123,7 @@ def print_metrics(rows: list[tuple[float, ...]], selected_height: int) -> None:
         height, groups, minimum, q1, median, mean, q3, maximum, _, cv, ratio, share, gini = row
         marker = "*" if height == selected_height else " "
         print(
-            f"{marker}{int(height):5d} {int(groups):7d} {int(minimum):7d} "
+            f"{marker}{height:5.3g} {int(groups):7d} {int(minimum):7d} "
             f"{q1:7.1f} {median:7.1f} {mean:7.1f} {q3:7.1f} "
             f"{int(maximum):7d} {ratio:8.1f} {share:8.2f}% {cv:5.2f} {gini:6.3f}"
         )
@@ -135,7 +138,7 @@ def write_metrics(rows: list[tuple[float, ...]], out_path: Path) -> None:
         writer.writerow(METRIC_HEADER)
         for row in rows:
             writer.writerow(
-                [int(row[0]), int(row[1]), int(row[2])]
+                [row[0], int(row[1]), int(row[2])]
                 + [f"{value:.4f}" for value in row[3:7]]
                 + [int(row[7])]
                 + [f"{value:.4f}" for value in row[8:]]
@@ -146,9 +149,10 @@ def write_metrics(rows: list[tuple[float, ...]], out_path: Path) -> None:
 def plot_dendrogram(
     linkage_matrix: np.ndarray,
     n_voters: int,
-    max_height: int,
+    max_height: float,
     out_path: Path,
     show: bool,
+    metric: str = "hamming",
 ) -> None:
     """Plot the hierarchy with groups through max_height collapsed to leaves."""
     _, sizes = groups_at_height(linkage_matrix, n_voters, max_height)
@@ -169,7 +173,9 @@ def plot_dendrogram(
         truncate_mode="lastp",
         p=n_groups,
         show_leaf_counts=True,
-        show_contracted=True,
+        # SciPy recursively traverses hidden subtrees to draw contraction
+        # marks; thousands of identical voters can exceed its recursion limit.
+        show_contracted=False,
         leaf_label_func=group_label,
         leaf_rotation=90,
         leaf_font_size=max(4, min(8, 700 / n_groups)),
@@ -185,7 +191,7 @@ def plot_dendrogram(
         f"Complete-linkage voter dendrogram: {n_groups} groups at height {max_height}"
     )
     ax.set_xlabel("Terminal group size (number of voters)")
-    ax.set_ylabel("Number of candidate approvals that differ")
+    ax.set_ylabel("Jaccard distance" if metric == "jaccard" else "Number of candidate approvals that differ")
     ax.legend(loc="upper left")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -210,27 +216,30 @@ def main() -> None:
         help="output CSV containing group-size metrics at every height",
     )
     parser.add_argument(
-        "--max-height", type=int, default=4, metavar="HEIGHT",
-        help="collapse joins at or below this integer Hamming distance (default: 4)",
+        "--max-height", type=float, default=None, metavar="HEIGHT",
+        help="collapse joins through this distance (default: Hamming 4, Jaccard 0.5)",
     )
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default="hamming")
     args = parser.parse_args()
+    if args.max_height is None:
+        args.max_height = 0.5 if args.metric == "jaccard" else 4
 
     if args.max_height < 0:
-        parser.error("--max-height must be a nonnegative integer")
+        parser.error("--max-height must be nonnegative")
     names, matrix = load_matrix(args.csv)
-    if args.max_height > len(names):
-        parser.error("--max-height cannot exceed the number of candidates")
+    if args.max_height > (1 if args.metric == "jaccard" else len(names)):
+        parser.error("--max-height exceeds the metric diameter")
     print(f"loaded {matrix.shape[0]} voters x {len(names)} candidates")
-    print("computing complete-linkage clustering with integer Hamming distance ...")
-    linkage_matrix = linkage(matrix, method="complete", metric="cityblock")
+    print(f"computing complete-linkage clustering with {args.metric} distance ...")
+    linkage_matrix = linkage(matrix, method="complete", metric="jaccard" if args.metric == "jaccard" else "cityblock")
 
-    rows = metrics_by_height(linkage_matrix, matrix.shape[0], args.max_height)
+    rows = metrics_by_height(linkage_matrix, matrix.shape[0], args.max_height, args.metric)
     print_metrics(rows, args.max_height)
     _, selected_sizes = groups_at_height(linkage_matrix, matrix.shape[0], args.max_height)
     print(f"\nselected group sizes, largest to smallest:\n  {selected_sizes.tolist()}")
     write_metrics(rows, args.metrics_csv)
-    plot_dendrogram(linkage_matrix, matrix.shape[0], args.max_height, args.out, args.show)
+    plot_dendrogram(linkage_matrix, matrix.shape[0], args.max_height, args.out, args.show, args.metric)
 
 
 if __name__ == "__main__":

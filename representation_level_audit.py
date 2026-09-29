@@ -1,7 +1,7 @@
 """Measure local representation at every level below the center count.
 
 For each voter i and representation level l < k, this audit finds the
-smallest closed Hamming ball centered at i that contains at least
+smallest closed metric ball centered at i that contains at least
 ceil(l * n / k) voters. The voter passes level l when that same ball contains
 at least l chosen centers. Output summarizes the per-level passing portions.
 """
@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import TextIO
 
 import numpy as np
+from ballot_distances import row_distances
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
 
-from generic_dc_mpjr_min_gamma import hamming_distances, load_matrix
+from generic_dc_mpjr_min_gamma import load_matrix
 from proportional_audit import resolve_candidate
 
 
@@ -54,6 +55,7 @@ def representation_level_audit(
     voters: np.ndarray,
     chosen_centers: np.ndarray,
     evaluation_mask: np.ndarray | None = None,
+    metric: str = "hamming",
 ) -> list[RepresentationLevelResult]:
     """Return the passing-voter portion for every level 1 <= l < k.
 
@@ -91,12 +93,12 @@ def representation_level_audit(
     # Sorting once lets each level use order statistics directly. The target
     # voter radius is the target-th distance, and the radius needed to include
     # l centers is the l-th chosen-center distance.
-    evaluated_voters = voters[evaluation_mask]
+    evaluated_voters, evaluated_counts = np.unique(voters[evaluation_mask], axis=0, return_counts=True)
     voter_distances = np.sort(
-        hamming_distances(evaluated_voters, voters), axis=1
+        row_distances(evaluated_voters, voters, metric), axis=1
     )
     center_distances = np.sort(
-        hamming_distances(evaluated_voters, chosen_centers), axis=1
+        row_distances(evaluated_voters, chosen_centers, metric), axis=1
     )
 
     results: list[RepresentationLevelResult] = []
@@ -104,7 +106,7 @@ def representation_level_audit(
         target_voter_count = (level * n + k - 1) // k
         ball_radii = voter_distances[:, target_voter_count - 1]
         level_center_radii = center_distances[:, level - 1]
-        satisfied_count = int(np.count_nonzero(level_center_radii <= ball_radii))
+        satisfied_count = int(evaluated_counts[level_center_radii <= ball_radii].sum())
         results.append(
             RepresentationLevelResult(
                 representation_level=level,
@@ -185,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Report the average, minimum, and maximum voter-representation "
-            "portions across levels l < k using closed Hamming balls."
+            "portions across levels l < k using closed Hamming or Jaccard balls."
         )
     )
     parser.add_argument(
@@ -229,6 +231,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Display the graph interactively",
     )
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default="hamming")
     args = parser.parse_args()
     if (args.centers is None) == (args.candidate is None):
         parser.error("provide either a centers CSV or --candidate, but not both")
@@ -261,6 +264,7 @@ def main() -> int:
         results = representation_level_audit(
             voters,
             chosen_centers,
+            metric=args.metric,
             evaluation_mask=(
                 ~approving
                 if args.candidate is not None and not args.include_approvers

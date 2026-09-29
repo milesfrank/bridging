@@ -9,7 +9,7 @@ representation_level_audit.py. For candidate c, X is its approvers and M is
 the electorate with coordinate c forced to 1. At quota q = ceil(n/k), rho
 is max(1, max_y q-th-largest_i D(i,X)/d(i,y)). All voters participate.
 The default Euclidean distance matches proportional_audit.py on binary data;
---metric hamming uses the metric from representation_level_audit.py instead.
+--metric hamming uses raw disagreement counts; --metric jaccard uses approval-set distance.
 Unlike the existing proportional audit, k is independent of the size of X.
 An empty approver set is assigned infinity at every quota.
 
@@ -29,6 +29,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
+from ballot_distances import row_distances
 
 from generic_dc_mpjr_min_gamma import load_matrix
 from proportional_audit import resolve_candidate
@@ -87,8 +88,8 @@ def candidate_curves(voters: np.ndarray, metric: str = "euclidean") -> np.ndarra
         raise ValueError("voters must be a nonempty two-dimensional matrix")
     if not np.all((voters == 0) | (voters == 1)):
         raise ValueError("voter matrix must be binary")
-    if metric not in ("euclidean", "hamming"):
-        raise ValueError("metric must be euclidean or hamming")
+    if metric not in ("euclidean", "hamming", "jaccard"):
+        raise ValueError("metric must be euclidean, hamming or jaccard")
     locations, counts = np.unique(voters, axis=0, return_counts=True)
     quotas = np.array([q for _, _, q in quota_intervals(len(voters))])
     curves = np.ones((voters.shape[1], len(quotas)))
@@ -99,13 +100,13 @@ def candidate_curves(voters: np.ndarray, metric: str = "euclidean") -> np.ndarra
             continue
         nearest = np.full(len(locations), np.inf)
         for center in locations[approved]:
-            nearest = np.minimum(nearest, np.count_nonzero(locations != center, axis=1))
+            nearest = np.minimum(nearest, row_distances(locations, center[None, :], "hamming" if metric == "euclidean" else metric)[:, 0])
         if metric == "euclidean":
             nearest = np.sqrt(nearest)
         potential = locations.copy()
         potential[:, column] = 1
         for center in np.unique(potential, axis=0):
-            distance = np.count_nonzero(locations != center, axis=1).astype(float)
+            distance = row_distances(locations, center[None, :], "hamming" if metric == "euclidean" else metric)[:, 0].astype(float)
             if metric == "euclidean":
                 distance = np.sqrt(distance)
             ratios = np.divide(nearest, distance, out=np.zeros_like(nearest),
@@ -122,7 +123,7 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("csv", type=Path, nargs="?",
                         default=ROOT / "matrices" / "frenchapproval.csv")
-    parser.add_argument("--metric", choices=("euclidean", "hamming"), default="euclidean")
+    parser.add_argument("--metric", choices=("euclidean", "hamming", "jaccard"), default="euclidean")
     parser.add_argument("--winner", action="append", default=[], metavar="METHOD=CANDIDATE",
                         help="Repeat for each method's winner (or each tied winner)")
     parser.add_argument("--output", type=Path,

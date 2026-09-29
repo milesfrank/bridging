@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from ballot_distances import row_distances
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
@@ -99,6 +100,7 @@ def audit_exact(
     chosen_centers: np.ndarray,
     candidate_centers: np.ndarray | None = None,
     k: int | None = None,
+    metric: str = "euclidean",
 ) -> AuditResult:
     """Return the exact minimum rho for a clustering solution.
 
@@ -111,14 +113,18 @@ def audit_exact(
     if candidate_centers is None:
         candidate_centers = points
     _validate_inputs(points, chosen_centers, k, candidate_centers.shape[0])
-    chosen_distances = _squared_euclidean(points, chosen_centers)
-    candidate_distances = _squared_euclidean(points, candidate_centers)
-    return _audit_from_distances(
-        np.sqrt(chosen_distances.min(axis=1)),
-        np.sqrt(candidate_distances),
+    chosen_distances = row_distances(points, np.unique(chosen_centers, axis=0), metric)
+    _, candidate_rows = np.unique(candidate_centers, axis=0, return_index=True)
+    candidate_rows.sort()
+    candidate_distances = row_distances(points, candidate_centers[candidate_rows], metric)
+    result = _audit_from_distances(
+        chosen_distances.min(axis=1),
+        candidate_distances,
         k,
         population_size=points.shape[0],
     )
+    return AuditResult(result.rho, int(candidate_rows[result.worst_center]),
+                       result.coalition_size, result.population_size, result.exact, result.score)
 
 
 def load_csv(path: Path) -> tuple[list[str], np.ndarray]:
@@ -161,6 +167,7 @@ def main() -> None:
         "--candidate", required=True,
         help="Candidate whose approvers become the chosen centers",
     )
+    parser.add_argument("--metric", choices=("euclidean", "hamming", "jaccard"), default="euclidean")
     args = parser.parse_args()
 
     names, points = load_csv(args.csv)
@@ -184,6 +191,7 @@ def main() -> None:
         chosen,
         candidate_centers=potential_approvers,
         k=len(chosen),
+        metric=args.metric,
     )
     print(f"exact rho: {result.rho:.6g}")
     print(f"rho worst candidate row: {result.worst_center}")

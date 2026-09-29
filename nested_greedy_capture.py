@@ -3,7 +3,7 @@
 For every level k, the returned family G_k contains at most k groups, and every
 group has size q_k = ceil(n / k).  Group members are zero-based row numbers in
 the input CSV.  Hamming distance is the default because the matrices in this
-repository are approval ballots; Euclidean distance is also supported.
+repository are approval ballots; Jaccard and Euclidean distances are also supported.
 
 When several choices are equally good, this implementation breaks ties by the
 input row number (and then by the previous group's order).  This makes repeated
@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+from ballot_distances import row_distances
 
 
 ROOT = Path(__file__).resolve().parent
@@ -79,6 +80,8 @@ def pairwise_distances(points: np.ndarray, metric: str) -> np.ndarray:
     """Return the symmetric point-to-point distance matrix."""
     if points.ndim != 2 or not len(points):
         raise ValueError("points must be a nonempty two-dimensional matrix")
+    if metric == "jaccard":
+        return row_distances(points, points, metric)
     if metric == "hamming":
         return np.count_nonzero(
             points[:, None, :] != points[None, :, :], axis=2
@@ -260,6 +263,66 @@ def validate_levels(levels: Sequence[Level], population_size: int) -> None:
                 raise ValueError(f"G_{level.k} contains an invalid point index")
 
 
+def construct_ballot_levels(points: np.ndarray, metric: str) -> list[Level]:
+    """Construct the same hierarchy using unique locations as ball centers.
+
+    Voters retain their original row numbers and multiplicity. Duplicate ball
+    centers are equivalent, so the first row is the canonical tie winner.
+    """
+    locations, first, voter_type, counts = np.unique(
+        points, axis=0, return_index=True, return_inverse=True, return_counts=True
+    )
+    distances = row_distances(locations, locations, metric)
+    shells, shell_ids = np.unique(distances, return_inverse=True)
+    shell_ids = shell_ids.reshape(distances.shape)
+    center_order = np.argsort(first)
+    initial_counts = np.zeros((len(locations), len(shells)), dtype=np.int64)
+    for center in range(len(locations)):
+        np.add.at(initial_counts[center], shell_ids[center], counts)
+    n = len(points)
+    groups = tuple((i,) for i in range(n))
+    levels = [Level(n, 1, 1, groups, False)]
+    previous_quota, alpha = 1, 1
+    for k in range(n - 1, 0, -1):
+        quota = math.ceil(n / k)
+        if quota == previous_quota:
+            levels.append(Level(k, quota, alpha, groups, True))
+            continue
+        remaining = np.ones(n, dtype=bool)
+        histogram = initial_counts.copy()
+        captures = []
+        for _ in range(n // quota):
+            radius_ids = np.argmax(np.cumsum(histogram, axis=1) >= quota, axis=1)
+            center_type = int(center_order[np.argmin(radius_ids[center_order])])
+            available = np.flatnonzero(remaining)
+            order = np.lexsort((available, distances[center_type, voter_type[available]]))
+            members = available[order[:quota]]
+            captures.append(Capture(int(first[center_type]),
+                                    float(distances[center_type, voter_type[members[-1]]]),
+                                    tuple(int(i) for i in members)))
+            remaining[members] = False
+            removed_types, removed_counts = np.unique(voter_type[members], return_counts=True)
+            for removed, count in zip(removed_types, removed_counts):
+                histogram[np.arange(len(locations)), shell_ids[:, removed]] -= count
+        # All voters at one location induce the same maximum group distance.
+        previous_types = [np.unique(voter_type[list(group)]) for group in groups]
+        group_radii = np.column_stack([distances[:, types].max(axis=1) for types in previous_types])
+        nearest = np.argmin(group_radii, axis=1)
+        new_groups, sources = [], []
+        for capture in captures:
+            source = int(nearest[voter_type[capture.center]])
+            old = groups[source]
+            old_members = set(old)
+            additions = [i for i in capture.members if i not in old_members]
+            new_groups.append(old + tuple(additions[:quota - previous_quota]))
+            sources.append(source)
+        groups = tuple(new_groups)
+        alpha += 2
+        levels.append(Level(k, quota, alpha, groups, False, tuple(captures), tuple(sources)))
+        previous_quota = quota
+    return levels
+
+
 def write_json(
     path: Path, input_path: Path, metric: str, feature_names: Sequence[str], levels: Sequence[Level]
 ) -> None:
@@ -312,7 +375,7 @@ def parse_args() -> argparse.Namespace:
         description="Build all G_k group families using augmented Greedy Capture."
     )
     parser.add_argument("csv", type=Path, nargs="?", default=DEFAULT_CSV)
-    parser.add_argument("--metric", choices=("hamming", "euclidean"), default="hamming")
+    parser.add_argument("--metric", choices=("hamming", "euclidean", "jaccard"), default="hamming")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser.parse_args()
 
@@ -320,8 +383,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     feature_names, points = load_matrix(args.csv)
-    distances = pairwise_distances(points, args.metric)
-    levels = construct_levels(distances)
+    levels = construct_ballot_levels(points, args.metric)
     validate_levels(levels, len(points))
     write_json(args.output, args.csv, args.metric, feature_names, levels)
 

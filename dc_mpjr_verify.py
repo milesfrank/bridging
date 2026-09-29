@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from ballot_distances import row_distances
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CSV = ROOT / "matrices" / "frenchapproval.csv"
@@ -34,7 +35,7 @@ class VerificationResult:
     candidate_center_count: int
     selected_center_count: int
     witness_center: int | None = None
-    witness_radius: int | None = None
+    witness_radius: float | None = None
     witness_coalition_size: int | None = None
     witness_deserved_centers: int | None = None
     witness_covered_centers: int | None = None
@@ -76,12 +77,14 @@ def verify_gamma_dc_mpjr(
     candidate_centers: np.ndarray,
     selected_indices: np.ndarray | list[int],
     gamma: float = 1.0,
+    metric: str = "hamming",
 ) -> VerificationResult:
     """Verify gamma-DC-mPJR+ and return the first violation, if any.
 
     ``agents`` represents N, rows of ``candidate_centers`` represent M, and
     ``selected_indices`` identifies the rows of M that form X. Center and
-    witness indices are zero-based. Distances count unequal coordinates.
+    witness indices are zero-based. Hamming is the default; Jaccard requires
+    binary approval rows.
     """
     agents = np.asarray(agents)
     candidate_centers = np.asarray(candidate_centers)
@@ -98,19 +101,23 @@ def verify_gamma_dc_mpjr(
 
     # This n-by-k table is independent of the unselected center c. Its row
     # minima over the current prefix P are the paper's delta(x) values.
-    agent_to_selected = hamming_distances(agents, selected_centers)
+    agents, agent_counts = np.unique(agents, axis=0, return_counts=True)
+    selected_types, selected_counts = np.unique(selected_centers, axis=0, return_counts=True)
+    agent_to_selected = row_distances(agents, selected_types, metric)
+    unselected = np.flatnonzero(~selected_mask)
+    _, first = np.unique(candidate_centers[unselected], axis=0, return_index=True)
+    unselected = unselected[np.sort(first)]
 
-    for center_index in np.flatnonzero(~selected_mask):
-        distances_to_center = np.count_nonzero(
-            agents != candidate_centers[center_index], axis=1
-        )
+    for center_index in unselected:
+        distances_to_center = row_distances(agents, candidate_centers[center_index:center_index + 1], metric)[:, 0]
         order = np.argsort(distances_to_center, kind="stable")
         ordered_distances = distances_to_center[order]
-        delta = np.full(k, np.inf)
+        delta = np.full(len(selected_types), np.inf)
+        cumulative_counts = np.cumsum(agent_counts[order])
 
         batch_start = 0
-        while batch_start < n:
-            radius = int(ordered_distances[batch_start])
+        while batch_start < len(agents):
+            radius = float(ordered_distances[batch_start])
             batch_end = int(
                 np.searchsorted(ordered_distances, radius, side="right")
             )
@@ -122,9 +129,9 @@ def verify_gamma_dc_mpjr(
                 delta,
                 agent_to_selected[new_agents].min(axis=0),
             )
-            coalition_size = batch_end
+            coalition_size = int(cumulative_counts[batch_end - 1])
             deserved_centers = coalition_size * k // n
-            covered_centers = int(np.count_nonzero(delta <= gamma * radius))
+            covered_centers = int(selected_counts[delta <= np.nextafter(gamma * radius, np.inf)].sum())
 
             if covered_centers < deserved_centers:
                 return VerificationResult(
@@ -155,6 +162,7 @@ def verify_candidate(
     points: np.ndarray,
     candidate: str,
     gamma: float = 1.0,
+    metric: str = "hamming",
 ) -> tuple[str, VerificationResult]:
     """Verify a candidate under the potential-approver construction."""
     candidate_name, potential_approvers, selected_indices = (
@@ -165,6 +173,7 @@ def verify_candidate(
         candidate_centers=potential_approvers,
         selected_indices=selected_indices,
         gamma=gamma,
+        metric=metric,
     )
     return candidate_name, result
 
@@ -193,6 +202,7 @@ def minimum_gamma_candidate(
     names: list[str],
     points: np.ndarray,
     candidate: str,
+    metric: str = "hamming",
 ) -> tuple[str, MinimumGammaResult]:
     """Find the exact minimum gamma for a potential-approver instance."""
     candidate_name, potential_approvers, selected_indices = (
@@ -202,6 +212,7 @@ def minimum_gamma_candidate(
         agents=points,
         candidate_centers=potential_approvers,
         selected_indices=selected_indices,
+        metric=metric,
     )
     return candidate_name, result
 
@@ -211,6 +222,7 @@ def audit_candidate(
     points: np.ndarray,
     candidate: str,
     gamma: float = 1.0,
+    metric: str = "hamming",
 ) -> tuple[str, VerificationResult, MinimumGammaResult]:
     """Verify gamma and find the exact minimum in one candidate audit."""
     candidate_name, potential_approvers, selected_indices = (
@@ -221,11 +233,13 @@ def audit_candidate(
         candidate_centers=potential_approvers,
         selected_indices=selected_indices,
         gamma=gamma,
+        metric=metric,
     )
     minimum = minimum_gamma_dc_mpjr_indices(
         agents=points,
         candidate_centers=potential_approvers,
         selected_indices=selected_indices,
+        metric=metric,
     )
     return candidate_name, verification, minimum
 
@@ -234,7 +248,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Verify gamma-DC-mPJR+ and find the exact minimum gamma using "
-            "Hamming distance."
+            "Hamming or Jaccard distance."
         )
     )
     parser.add_argument(
@@ -255,6 +269,7 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Approximation factor (at least 1; default: 1)",
     )
+    parser.add_argument("--metric", choices=("hamming", "jaccard"), default="hamming")
     return parser.parse_args()
 
 
@@ -267,12 +282,13 @@ def main() -> None:
             points,
             args.candidate,
             gamma=args.gamma,
+            metric=args.metric,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
     print(f"candidate: {candidate}")
-    print(f"distance: Hamming")
+    print(f"distance: {args.metric}")
     print(f"gamma: {result.gamma:g}")
     print(f"population size: {result.population_size}")
     print(f"candidate centers in M: {result.candidate_center_count}")
